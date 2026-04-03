@@ -1,0 +1,12 @@
+backend/build/
+*.exe
+*.out
+
+__pycache__/
+*.pyc
+
+.DS_Store
+Thumbs.db
+
+data/input.txt
+data/output.txt
