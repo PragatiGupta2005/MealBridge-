@@ -113,32 +113,6 @@ Advantages:
 - Food wastage reduced  
 - System efficiency  
 
-📁 Folder Structure
-MealBridge/
-│
-├── backend/
-│ ├── include/
-│ ├── src/
-│ └── build/
-│
-├── frontend/
-│ ├── app.py
-│ ├── ui/
-│ ├── utils/
-│ └── assets/
-│
-├── data/
-│ ├── input.txt
-│ └── output.txt
-│
-├── docs/
-│ └── UML/
-│
-├── tests/
-│
-├── README.md
-└── .gitignore
-
  🚀 Future Enhancements
 
 - Database integration  
