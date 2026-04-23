@@ -146,13 +146,13 @@ class DataStore:
             self.history.append({"time":d["timestamp"],"type":"DONATION","msg":f"Donation #{d["id"]} by {dn} ({d["zone"]})"})
         self._nid["donation"]=204
         for r in [
-            {"id":301,"receiver_id":101,"qty":40,"urgency":3,"zone":"Zone A","timestamp":"2025-07-01 10:30"},
-            {"id":302,"receiver_id":102,"qty":50,"urgency":2,"zone":"Zone B","timestamp":"2025-07-01 11:30"},
-            {"id":303,"receiver_id":103,"qty":60,"urgency":1,"zone":"Zone C","timestamp":"2025-07-01 12:30"},
+            {"id":301,"receiver_id":101,"qty":40,"urgency":3,"zone":"Zone A","item":"Rice","timestamp":"2025-07-01 10:30"},
+            {"id":302,"receiver_id":102,"qty":50,"urgency":2,"zone":"Zone B","item":"Dal","timestamp":"2025-07-01 11:30"},
+            {"id":303,"receiver_id":103,"qty":60,"urgency":1,"zone":"Zone C","item":"Pasta","timestamp":"2025-07-01 12:30"},
         ]:
             self.requests.append(r)
             rn=self.receivers.get(r["receiver_id"],{}).get("name","?")
-            self.history.append({"time":r["timestamp"],"type":"REQUEST","msg":f"Request #{r["id"]} by {rn} urgency {r["urgency"]}"})
+            self.history.append({"time":r["timestamp"],"type":"REQUEST","msg":f"Request #{r["id"]} by {rn} ({r['item']}) urgency {r["urgency"]}"})
         self._nid["request"]=304
         self._run_matching()
 
@@ -183,12 +183,13 @@ class DataStore:
         self._log("DONATION",f"Donation #{d["id"]} by {dn} in {zone}")
         self._run_matching(); return d["id"]
 
-    def add_request(self,recv_id,qty,urgency,zone):
+    def add_request(self,recv_id,qty,urgency,zone,item="Any"):
+        item=(item or "Any").strip() or "Any"
         r={"id":self._nid["request"],"receiver_id":recv_id,"qty":qty,
-           "urgency":urgency,"zone":zone,"timestamp":datetime.now().strftime("%Y-%m-%d %H:%M")}
+           "urgency":urgency,"zone":zone,"item":item,"timestamp":datetime.now().strftime("%Y-%m-%d %H:%M")}
         self.requests.append(r); self._nid["request"]+=1
         rn=self.receivers.get(recv_id,{}).get("name","?")
-        self._log("REQUEST",f"Request #{r["id"]} by {rn} {qty} meals urgency {urgency}")
+        self._log("REQUEST",f"Request #{r["id"]} by {rn} {qty} meals ({item}) urgency {urgency}")
         self._run_matching(); return r["id"]
 
     def _log(self,typ,msg):
@@ -196,18 +197,47 @@ class DataStore:
 
     def _expiry(self,d): return min((i["expiry"] for i in d["items"]),default=9999)
     def _qty(self,d): return sum(i["qty"] for i in d["items"])
+    def _norm_item(self,item): return (item or "Any").strip().lower()
+    def _disp_item(self,item): return (item or "Any").strip() or "Any"
+
+    def _item_qty(self,donation,item):
+        ni=self._norm_item(item)
+        if ni=="any": return self._qty(donation)
+        return sum(i["qty"] for i in donation["items"] if self._norm_item(i.get("name",""))==ni)
 
     def _run_matching(self):
         self.matches=[]
         sd=sorted(self.donations,key=self._expiry)
         sr=sorted(self.requests,key=lambda r:-r["urgency"])
-        rd={d["id"]:self._qty(d) for d in sd}; rr={r["id"]:r["qty"] for r in sr}
+        rr={r["id"]:r["qty"] for r in sr}
+        rem={}
+        for d in sd:
+            items={}
+            for it in d["items"]:
+                k=self._norm_item(it.get("name",""))
+                items[k]=items.get(k,0)+max(0,int(it.get("qty",0)))
+            rem[d["id"]]={"total":sum(items.values()),"items":items}
         for req in sr:
             if rr.get(req["id"],0)<=0: continue
-            for don in sd:
-                if rd.get(don["id"],0)<=0: continue
-                if don["zone"]!=req["zone"]: continue
-                alloc=min(rd[don["id"]],rr[req["id"]])
+            req_item=self._norm_item(req.get("item","Any"))
+            donors_sorted=sorted(sd,key=lambda d: 0 if d["zone"]==req["zone"] else 1)
+            for don in donors_sorted:
+                st=rem.get(don["id"],{"total":0,"items":{}})
+                if st["total"]<=0: continue
+                avail=st["total"] if req_item=="any" else st["items"].get(req_item,0)
+                if avail<=0: continue
+                alloc=min(avail,rr[req["id"]])
+                if alloc<=0: continue
+                if req_item=="any":
+                    left=alloc
+                    for item_name in list(st["items"].keys()):
+                        if left<=0: break
+                        take=min(st["items"][item_name],left)
+                        st["items"][item_name]-=take
+                        left-=take
+                else:
+                    st["items"][req_item]-=alloc
+                st["total"]-=alloc
                 dn=self.donors.get(don["donor_id"],{}).get("name","?")
                 rn=self.receivers.get(req["receiver_id"],{}).get("name","?")
                 parts=[]
@@ -215,11 +245,13 @@ class DataStore:
                 elif self._expiry(don)<=5: parts.append("Near expiry")
                 if req["urgency"]==3: parts.append("High urgency")
                 elif req["urgency"]==2: parts.append("Medium urgency")
-                if not parts: parts.append("Zone match")
+                if req_item!="any": parts.append("Item match")
+                parts.append("Zone match" if don["zone"]==req["zone"] else "Cross-zone fallback")
                 self.matches.append({"donation_id":don["id"],"request_id":req["id"],"donor_name":dn,
                     "receiver_name":rn,"zone":don["zone"],"meals":alloc,"urgency":req["urgency"],
-                    "reason":" · ".join(parts),"partial":alloc<self._qty(don) or alloc<req["qty"]})
-                rd[don["id"]]-=alloc; rr[req["id"]]-=alloc
+                    "item":self._disp_item(req.get("item","Any")),
+                    "reason":" · ".join(parts),"partial":alloc<avail or alloc<req["qty"]})
+                rr[req["id"]]-=alloc
                 if rr[req["id"]]<=0: break
         self.stats["total_matches"]=len(self.matches)
         self.stats["total_meals"]=sum(m["meals"] for m in self.matches)
@@ -229,16 +261,20 @@ class DataStore:
         s=[]
         for req in self.requests:
             if req["id"] in ur: continue
+            req_item=self._norm_item(req.get("item","Any"))
             for don in self.donations:
                 if don["id"] in ud: continue
-                if don["zone"]!=req["zone"]: continue
+                if req_item!="any" and self._item_qty(don,req_item)<=0: continue
                 exp=self._expiry(don); score=req["urgency"]*10+max(0,10-exp)
+                if don["zone"]!=req["zone"]:
+                    score-=3
                 parts=[]
                 if exp<=2: parts.append("Critical expiry")
                 elif exp<=5: parts.append("Near expiry")
                 if req["urgency"]==3: parts.append("High urgency")
                 elif req["urgency"]==2: parts.append("Medium urgency")
-                if not parts: parts.append("Zone match")
+                if req_item!="any": parts.append("Item match")
+                parts.append("Zone match" if don["zone"]==req["zone"] else "Cross-zone fallback")
                 s.append({"don":don,"req":req,"score":score,"reason":" · ".join(parts)})
         s.sort(key=lambda x:-x["score"]); return s[:3]
 
@@ -322,7 +358,7 @@ class DataStore:
                 res.append(("DON",f"Donation #{d["id"]} — {dn} ({d["zone"]})",d))
         for r in self.requests:
             rn=self.receivers.get(r["receiver_id"],{}).get("name","")
-            if q in rn.lower() or q in r["zone"].lower():
+            if q in rn.lower() or q in r["zone"].lower() or q in r.get("item","any").lower():
                 res.append(("REQ",f"Request #{r["id"]} — {rn} ({r["zone"]})",r))
         for uid,dn in self.donors.items():
             if q in dn["name"].lower() or q in dn["zone"].lower():
@@ -344,16 +380,16 @@ class DataStore:
     def export_csv(self,path):
         with open(path,"w",newline="",encoding="utf-8") as f:
             w=csv.writer(f)
-            w.writerow(["Type","ID","Zone","Name","Meals","Urgency","Time"])
+            w.writerow(["Type","ID","Zone","Name","Item","Meals","Urgency","Time"])
             for d in self.donations:
                 dn=self.donors.get(d["donor_id"],{}).get("name","?")
-                w.writerow(["DONATION",d["id"],d["zone"],dn,self._qty(d),"",d["timestamp"]])
+                w.writerow(["DONATION",d["id"],d["zone"],dn,"Multiple",self._qty(d),"",d["timestamp"]])
             for r in self.requests:
                 rn=self.receivers.get(r["receiver_id"],{}).get("name","?")
-                w.writerow(["REQUEST",r["id"],r["zone"],rn,r["qty"],r["urgency"],r["timestamp"]])
+                w.writerow(["REQUEST",r["id"],r["zone"],rn,r.get("item","Any"),r["qty"],r["urgency"],r["timestamp"]])
             for m in self.matches:
                 w.writerow(["MATCH",f"{m["donation_id"]}→{m["request_id"]}",m["zone"],
-                            f"{m["donor_name"]}→{m["receiver_name"]}",m["meals"],m["urgency"],""])
+                            f"{m["donor_name"]}→{m["receiver_name"]}",m.get("item","Any"),m["meals"],m["urgency"],""])
 
     def export_json(self,path):
         def df(o): return o.isoformat() if isinstance(o,datetime) else str(o)
@@ -996,7 +1032,7 @@ class App(tk.Tk):
         else:
             tk.Label(status_row,text="⏳ PENDING",bg=C["warning"],fg=C["white"],
                     font=("Courier New",8,"bold"),padx=8,pady=3).pack(side="left")
-            tk.Label(status_row,text="  Waiting for a matching request in this zone",
+            tk.Label(status_row,text="  Waiting for a matching request (same zone preferred)",
                     bg=C["card"],fg=C["muted"],font=("Courier New",9)).pack(side="left")
         tk.Label(inner,text="Zone:"+don["zone"]+"  •  "+don["timestamp"],bg=C["card"],fg=C["muted"],font=("Courier New",9)).pack(anchor="w",pady=(2,6))
         tk.Frame(inner,bg=C["border"],height=1).pack(fill="x")
@@ -1078,9 +1114,9 @@ class App(tk.Tk):
             else:
                 tk.Label(sr,text="⏳ PENDING",bg=C["warning"],fg=C["white"],
                         font=("Courier New",8,"bold"),padx=8,pady=3).pack(side="left")
-                tk.Label(sr,text="  Waiting for a matching donation in this zone",
+                tk.Label(sr,text="  Waiting for a matching donation (same zone preferred)",
                         bg=C["card"],fg=C["muted"],font=("Courier New",9)).pack(side="left")
-            tk.Label(inner,text="Zone:"+req["zone"]+"  •  "+str(req["qty"])+" meals  •  "+req["timestamp"],
+            tk.Label(inner,text="Item:"+req.get("item","Any")+"  •  Zone:"+req["zone"]+"  •  "+str(req["qty"])+" meals  •  "+req["timestamp"],
                     bg=C["card"],fg=C["muted"],font=("Courier New",9)).pack(anchor="w",pady=(2,0))
 
     # ══════════════════════════════════════════
@@ -1094,6 +1130,8 @@ class App(tk.Tk):
         inner=tk.Frame(form,bg=C["card"]); inner.pack(fill="x",padx=28,pady=20)
         lbl(inner,T("qty_needed"),size=9,color=C["muted"],bold=True).pack(anchor="w",pady=(0,4))
         f1,qe=mk_entry(inner,"e.g. 50"); f1.pack(fill="x",pady=(0,10))
+        lbl(inner,"FOOD ITEM",size=9,color=C["muted"],bold=True).pack(anchor="w",pady=(0,4))
+        fi,ie=mk_entry(inner,"e.g. Rice or Any"); fi.pack(fill="x",pady=(0,10))
         lbl(inner,T("zone_lbl"),size=9,color=C["muted"],bold=True).pack(anchor="w",pady=(0,4))
         zc=mk_combo(inner,ZONES); zc.pack(anchor="w",pady=(0,10))
         lbl(inner,T("urgency"),size=9,color=C["muted"],bold=True).pack(anchor="w",pady=(0,6))
@@ -1106,11 +1144,12 @@ class App(tk.Tk):
         def submit():
             try: qty=int(qe.get()); assert qty>0
             except: el.config(text="⚠  Enter a valid quantity."); return
+            item=ie.get().strip() or "Any"
             zone=zc.get(); urgency=uv.get(); un={1:"Low",2:"Medium",3:"High"}.get(urgency,"")
             def do():
-                rid=self.db.add_request(self.user["entity_id"],qty,urgency,zone)
+                rid=self.db.add_request(self.user["entity_id"],qty,urgency,zone,item)
                 self._toast(f"✅ Request #{rid} submitted!",col=C["accent2"]); self._pg_my_req()
-            confirm_dialog(self,T("confirm_title"),f"You are requesting:\n  • {qty} meals\n  • Zone: {zone}\n  • Urgency: {un}\n\nProceed?",do)
+            confirm_dialog(self,T("confirm_title"),f"You are requesting:\n  • {qty} meals\n  • Item: {item}\n  • Zone: {zone}\n  • Urgency: {un}\n\nProceed?",do)
         mk_btn(inner,T("submit_request"),submit,color=C["accent2"],width=28).pack(pady=10)
 
     # ══════════════════════════════════════════
@@ -1263,16 +1302,16 @@ class App(tk.Tk):
         mk_btn(br,"🔄 "+T("rerun"),rerun,color=C["accent2"],width=20,fs=10).pack(side="right")
         if not self.db.matches: empty_state(page,"🔗",T("no_matches"),"Matching runs automatically when zones align"); return
         hdr=tk.Frame(page,bg=C["surface"],highlightbackground=C["border"],highlightthickness=1); hdr.pack(fill="x")
-        for ct,wid in [("#D",5),("#R",5),("Donor",18),("Receiver",18),("Zone",8),("Meals",7),("Type",8),("Urgency",9),("Reason",26)]:
+        for ct,wid in [("#D",4),("#R",4),("Donor",16),("Receiver",16),("Item",12),("Zone",7),("Meals",6),("Type",8),("Urgency",8),("Reason",20)]:
             tk.Label(hdr,text=ct,width=wid,bg=C["surface"],fg=C["muted"],font=("Courier New",9,"bold"),anchor="w",padx=4,pady=8).pack(side="left")
         uc={1:C["muted"],2:C["warning"],3:C["error"]}; ul={1:"Low",2:"Med",3:"High"}
         for m in self.db.matches:
             row=tk.Frame(page,bg=C["white"],highlightbackground=C["border"],highlightthickness=1); row.pack(fill="x",pady=1)
             pt="⚖Partial" if m.get("partial") else "✅Full"; ptc=C["warning"] if m.get("partial") else C["success"]
-            vals=[(str(m["donation_id"]),5),(str(m["request_id"]),5),(m["donor_name"][:16],18),(m["receiver_name"][:16],18),
-                  (m["zone"],8),(str(m["meals"]),7),(pt,8),(ul.get(m.get("urgency",1),"?"),9),(m.get("reason","")[:26],26)]
+            vals=[(str(m["donation_id"]),4),(str(m["request_id"]),4),(m["donor_name"][:14],16),(m["receiver_name"][:14],16),
+                  (m.get("item","Any")[:10],12),(m["zone"],7),(str(m["meals"]),6),(pt,8),(ul.get(m.get("urgency",1),"?"),8),(m.get("reason","")[:20],20)]
             for i,(txt,wid) in enumerate(vals):
-                fg=uc.get(m.get("urgency",1),C["muted"]) if i==7 else ptc if i==6 else C["text"]
+                fg=uc.get(m.get("urgency",1),C["muted"]) if i==8 else ptc if i==7 else C["text"]
                 tk.Label(row,text=txt,width=wid,bg=C["white"],fg=fg,font=("Courier New",9),anchor="w",padx=4,pady=7).pack(side="left")
 
     # ══════════════════════════════════════════
@@ -1296,7 +1335,7 @@ class App(tk.Tk):
             tk.Label(hrow,text=f"Score: {s["score"]}",bg=C["white"],fg=C["muted"],font=("Courier New",10)).pack(side="right")
             exp=self.db._expiry(don); ecol=C["urgent"] if exp<=2 else C["warning"] if exp<=5 else C["muted"]
             tk.Label(inner,text=f"Donor: {dn} ({don["zone"]})",bg=C["white"],fg=C["text"],font=("Courier New",11)).pack(anchor="w",pady=(8,2))
-            tk.Label(inner,text=f"Receiver: {rn}  |  Urgency:{req["urgency"]}  |  Needs:{req["qty"]} meals",bg=C["white"],fg=C["text"],font=("Courier New",11)).pack(anchor="w",pady=(0,2))
+            tk.Label(inner,text=f"Receiver: {rn}  |  Item:{req.get('item','Any')}  |  Urgency:{req["urgency"]}  |  Needs:{req["qty"]} meals",bg=C["white"],fg=C["text"],font=("Courier New",11)).pack(anchor="w",pady=(0,2))
             tk.Label(inner,text=f"Expiry: {exp}h  •  "+", ".join(f"{it["name"]}({it["qty"]})" for it in don["items"]),bg=C["white"],fg=ecol,font=("Courier New",9)).pack(anchor="w",pady=(0,6))
             tk.Label(inner,text=f"💡 {s["reason"]}",bg=C["white"],fg=C["accent2"],font=("Courier New",9,"bold")).pack(anchor="w")
 

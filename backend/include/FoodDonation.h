@@ -34,7 +34,7 @@ public:
     void display() const;
 };
 
-// Comparator
+// Comparator do type of sorting
 struct DonationCompare {
     bool operator()(const FoodDonation& d1, const FoodDonation& d2) {
         return d1.getEarliestExpiry() > d2.getEarliestExpiry();

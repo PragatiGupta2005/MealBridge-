@@ -17,26 +17,26 @@ private:
     DonorType donorType;
 
 public:
-    // Constructor
+    // Constructor automatically calls when object is created
     FoodDonor(int id, string name, string contact, string zone, DonorType type);
 
-    // Destructor
+    // Destructor automatically calls when object is destroyed
     ~FoodDonor();
 
-    // Getter
+    // Getter read the value of private class variable
     DonorType getDonorType() const;
 
-    // Setter
+    // Setter update the value of private class vaiable
     void setDonorType(DonorType type);
 
     // Functional Methods
     void donateFood();  // will connect with FoodDonation later
 
-    // Overridden Methods (Polymorphism)
+    // Overridden Methods (Polymorphism) 
     void displayProfile() const override;
     string getUserType() const override;
 
-    // Helper
+    // Helper make your main code simpler, cleaner, and easier to understand
     string getDonorTypeString() const;
 };
 
